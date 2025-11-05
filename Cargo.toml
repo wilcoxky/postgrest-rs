@@ -13,6 +13,14 @@ edition = "2021"
 
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+async-trait = "0.1"
+serde = "1.0"
+serde_urlencoded = "0.7"
+urlencoding = "2.1"
+
+[features]
+default = []
+mock = []
 
 [dev-dependencies]
 json = "0.12"

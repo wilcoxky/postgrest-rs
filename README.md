@@ -184,6 +184,61 @@ let resp = client
 
 Check out the [API docs](https://docs.rs/postgrest) for more info!
 
+## Testing with MockClient
+
+This fork adds a pure in-memory `MockClient` for testing without requiring a Tokio reactor or actual network connections. Enable the `mock` feature to use it:
+
+```toml
+[dev-dependencies]
+postgrest = { version = "1.6", features = ["mock"] }
+```
+
+Example test using MockClient:
+
+```rust
+use postgrest::{PostgrestGeneric, mock::MockClient};
+
+#[tokio::test]
+async fn test_user_query() {
+    let mut mock = MockClient::new();
+
+    // Configure mock response
+    mock.mock("GET", "/rest/v1/users")
+        .match_header("Authorization", "Bearer test-token")
+        .match_query("id", "eq.1")
+        .match_query("select", "*")
+        .respond_with(200, r#"[{"id": 1, "name": "Alice"}]"#);
+
+    // Use with PostgrestGeneric
+    let client = PostgrestGeneric::new_with_client("http://test", mock);
+
+    let resp = client
+        .from("users")
+        .auth("test-token")
+        .eq("id", "1")
+        .select("*")
+        .execute()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Alice"));
+}
+```
+
+The MockClient follows an httpmock-inspired API:
+- `.mock(method, path)` - Start configuring a mock
+- `.match_header(name, value)` - Match request header
+- `.match_query(name, value)` - Match query parameter
+- `.respond_with(status, body)` - Set response
+
+Benefits:
+- ✅ Pure in-memory (no Tokio reactor needed)
+- ✅ Works with GPUI tests and other non-Tokio async runtimes
+- ✅ Fast - no network overhead
+- ✅ Fluent, expressive API
+
 ## Contributing
 
 Contributions are welcome! There might be some features you want in, or some

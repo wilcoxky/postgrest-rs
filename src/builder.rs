@@ -1,12 +1,13 @@
-pub use reqwest::Error;
 use reqwest::{
     header::{HeaderMap, HeaderValue},
-    Client, Method, Response,
+    Method,
 };
+
+use crate::http::{HttpClient, HttpRequestBuilder};
 
 /// QueryBuilder struct
 #[derive(Clone, Debug)]
-pub struct Builder {
+pub struct Builder<C: HttpClient> {
     method: Method,
     url: String,
     schema: Option<String>,
@@ -17,13 +18,13 @@ pub struct Builder {
     is_rpc: bool,
     // sharing a client is a good idea, performance wise
     // the client has to live at least as much as the builder
-    client: Client,
+    client: C,
 }
 
 // TODO: Test Unicode support
-impl Builder {
+impl<C: HttpClient> Builder<C> {
     /// Creates a new `Builder` with the specified `schema`.
-    pub fn new<T>(url: T, schema: Option<String>, headers: HeaderMap, client: Client) -> Self
+    pub fn new<T>(url: T, schema: Option<String>, headers: HeaderMap, client: C) -> Self
     where
         T: Into<String>,
     {
@@ -551,7 +552,7 @@ impl Builder {
     }
 
     /// Build the PostgREST request.
-    pub fn build(mut self) -> reqwest::RequestBuilder {
+    pub fn build(mut self) -> C::RequestBuilder {
         if let Some(schema) = self.schema {
             let key = match self.method {
                 Method::GET | Method::HEAD => "Accept-Profile",
@@ -575,7 +576,12 @@ impl Builder {
     }
 
     /// Executes the PostgREST request.
-    pub async fn execute(self) -> Result<Response, Error> {
+    pub async fn execute(
+        self,
+    ) -> Result<
+        <C::RequestBuilder as HttpRequestBuilder>::Response,
+        <C::RequestBuilder as HttpRequestBuilder>::Error,
+    > {
         self.build().send().await
     }
 }
@@ -583,6 +589,7 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reqwest::Client;
 
     const TABLE_URL: &str = "http://localhost:3000/table";
     const RPC_URL: &str = "http://localhost:3000/rpc";

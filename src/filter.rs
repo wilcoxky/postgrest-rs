@@ -1,6 +1,6 @@
-use crate::Builder;
+use crate::{http::HttpClient, Builder};
 
-impl Builder {
+impl<C: HttpClient> Builder<C> {
     /// Finds all rows which doesn't satisfy the filter.
     ///
     /// # Example

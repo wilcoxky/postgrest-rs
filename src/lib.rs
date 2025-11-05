@@ -76,20 +76,28 @@
 
 mod builder;
 mod filter;
+pub mod http;
+
+#[cfg(feature = "mock")]
+pub mod mock;
 
 pub use builder::Builder;
+use http::HttpClient;
 use reqwest::header::{HeaderMap, HeaderValue, IntoHeaderName};
 use reqwest::Client;
 
 #[derive(Clone, Debug)]
-pub struct Postgrest {
+pub struct PostgrestGeneric<C: HttpClient = Client> {
     url: String,
     schema: Option<String>,
     headers: HeaderMap,
-    client: Client,
+    client: C,
 }
 
+pub type Postgrest = PostgrestGeneric<Client>;
+
 impl Postgrest {
+    /// Create with default reqwest client (backward compatible)
     /// Creates a Postgrest client.
     ///
     /// # Example
@@ -99,15 +107,18 @@ impl Postgrest {
     ///
     /// let client = Postgrest::new("http://your.postgrest.endpoint");
     /// ```
-    pub fn new<T>(url: T) -> Self
-    where
-        T: Into<String>,
-    {
-        Postgrest {
+    pub fn new<T: Into<String>>(url: T) -> Self {
+        Self::with_client(url, reqwest::Client::new())
+    }
+}
+
+impl<C: HttpClient> PostgrestGeneric<C> {
+    pub fn with_client<T: Into<String>>(url: T, client: C) -> Self {
+        Self {
             url: url.into(),
             schema: None,
             headers: HeaderMap::new(),
-            client: Client::new(),
+            client,
         }
     }
 
@@ -167,7 +178,7 @@ impl Postgrest {
     /// let client = Postgrest::new("http://your.postgrest.endpoint");
     /// client.from("table");
     /// ```
-    pub fn from<T>(&self, table: T) -> Builder
+    pub fn from<T>(&self, table: T) -> Builder<C>
     where
         T: AsRef<str>,
     {
@@ -190,7 +201,7 @@ impl Postgrest {
     /// let client = Postgrest::new("http://your.postgrest.endpoint");
     /// client.rpc("multiply", r#"{"a": 1, "b": 2}"#);
     /// ```
-    pub fn rpc<T, U>(&self, function: T, params: U) -> Builder
+    pub fn rpc<T, U>(&self, function: T, params: U) -> Builder<C>
     where
         T: AsRef<str>,
         U: Into<String>,
