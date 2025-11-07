@@ -39,6 +39,7 @@ use reqwest::{
 };
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use crate::http::{HttpClient, HttpRequestBuilder, HttpResponse};
 
@@ -51,8 +52,25 @@ use crate::http::{HttpClient, HttpRequestBuilder, HttpResponse};
 /// The MockClient stores configured mock responses and matches incoming requests
 /// against them. When a request is made, it searches through the registered mocks
 /// and returns the first matching response.
-#[derive(Clone, Debug)]
+///
+/// MockClient uses Arc<Mutex<>> internally, so it can be cloned and shared across
+/// threads (similar to reqwest::Client). All clones share the same mock configuration.
+#[derive(Clone)]
 pub struct MockClient {
+    inner: Arc<Mutex<MockClientInner>>,
+}
+
+impl fmt::Debug for MockClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MockClient")
+            .field("inner", &"<MockClientInner>")
+            .finish()
+    }
+}
+
+/// Internal state for MockClient
+#[derive(Debug)]
+struct MockClientInner {
     mocks: Vec<MockRule>,
     default_response: Option<MockedResponse>,
 }
@@ -91,8 +109,10 @@ impl MockClient {
     /// By default, unmatched requests will return a 404 response.
     pub fn new() -> Self {
         Self {
-            mocks: Vec::new(),
-            default_response: None,
+            inner: Arc::new(Mutex::new(MockClientInner {
+                mocks: Vec::new(),
+                default_response: None,
+            })),
         }
     }
 
@@ -126,7 +146,8 @@ impl MockClient {
     ///
     /// If not set, unmatched requests return a 404 response.
     pub fn set_default_response(&mut self, status: u16, body: &str) {
-        self.default_response = Some(MockedResponse {
+        let mut inner = self.inner.lock().unwrap();
+        inner.default_response = Some(MockedResponse {
             status,
             body: body.to_string(),
             headers: HeaderMap::new(),
@@ -141,15 +162,16 @@ impl MockClient {
         headers: &HeaderMap,
         query: &[(String, String)],
     ) -> MockedResponse {
+        let inner = self.inner.lock().unwrap();
+
         // Try to find a matching mock
-        for rule in &self.mocks {
+        for rule in &inner.mocks {
             if rule.matcher.matches(method.as_str(), url, headers, query) {
                 return rule.response.clone();
             }
         }
-
         // Return default or 404
-        self.default_response.clone().unwrap_or_else(|| MockedResponse {
+        inner.default_response.clone().unwrap_or_else(|| MockedResponse {
             status: 404,
             body: format!("No mock found for {} {}", method, url),
             headers: HeaderMap::new(),
@@ -237,7 +259,8 @@ impl<'a> MockBuilder<'a> {
             headers,
         };
 
-        self.client.mocks.push(MockRule {
+        let mut inner = self.client.inner.lock().unwrap();
+        inner.mocks.push(MockRule {
             matcher: self.matcher,
             response,
         });
@@ -251,7 +274,8 @@ impl<'a> MockBuilder<'a> {
             headers,
         };
 
-        self.client.mocks.push(MockRule {
+        let mut inner = self.client.inner.lock().unwrap();
+        inner.mocks.push(MockRule {
             matcher: self.matcher,
             response,
         });
@@ -282,8 +306,16 @@ impl RequestMatcher {
             return false;
         }
 
-        // Extract path from URL (everything before ?)
-        let path = url.split('?').next().unwrap_or(url);
+        // Extract path from URL (strip scheme/host, then everything before ?)
+        // URL might be "http://test/rest/v1/exercise?select=*" or "/rest/v1/exercise?select=*"
+        let path_with_query = if url.starts_with("http://") || url.starts_with("https://") {
+            // Strip scheme and host: "http://test/rest/v1/exercise" -> "/rest/v1/exercise"
+            url.split("/").skip(3).collect::<Vec<_>>().join("/")
+        } else {
+            url.to_string()
+        };
+        let path = format!("/{}", path_with_query.split('?').next().unwrap_or(&path_with_query).trim_start_matches('/'));
+
         if self.path != path {
             return false;
         }
