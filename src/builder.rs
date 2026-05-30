@@ -69,6 +69,38 @@ impl<C: HttpClient> Builder<C> {
         self
     }
 
+    /// Adds an arbitrary header to this single request.
+    ///
+    /// Unlike [`crate::Postgrest::insert_header`], which sets a header on every
+    /// request from the client, this scopes the header to the one request being
+    /// built — e.g. a per-request `X-Masquerade-User-Id`. A name/value that
+    /// can't be parsed into a valid header is silently skipped so a bad input
+    /// can't panic the request path.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use postgrest::Postgrest;
+    ///
+    /// let client = Postgrest::new("https://your.postgrest.endpoint");
+    /// client
+    ///     .rpc("get_current_persona", "{}")
+    ///     .insert_header("X-Masquerade-User-Id", "00000000-0000-0000-0000-000000000000");
+    /// ```
+    pub fn insert_header<K, V>(mut self, key: K, value: V) -> Self
+    where
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        if let (Ok(name), Ok(val)) = (
+            reqwest::header::HeaderName::from_bytes(key.as_ref().as_bytes()),
+            HeaderValue::from_str(value.as_ref()),
+        ) {
+            self.headers.insert(name, val);
+        }
+        self
+    }
+
     /// Performs horizontal filtering with SELECT.
     ///
     /// # Note
