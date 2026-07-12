@@ -80,6 +80,10 @@ struct MockClientInner {
 struct MockRule {
     matcher: RequestMatcher,
     response: MockedResponse,
+    /// Number of times this mock can be matched.
+    /// `None` means unlimited (default - backwards compatible).
+    /// `Some(n)` means it can be matched n more times before being exhausted.
+    times_remaining: Option<usize>,
 }
 
 /// Matches incoming requests based on method, path, headers, and query parameters.
@@ -139,6 +143,7 @@ impl MockClient {
                 headers: HashMap::new(),
                 query_params: HashMap::new(),
             },
+            times: None, // Unlimited by default (backwards compatible)
         }
     }
 
@@ -154,7 +159,41 @@ impl MockClient {
         });
     }
 
+    /// Clears all configured mocks.
+    ///
+    /// This is useful in tests when you need to reset the mock state between
+    /// different test phases or operations.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use postgrest::mock::MockClient;
+    /// let mut mock = MockClient::new();
+    /// mock.mock("GET", "/users").respond_with(200, "[]");
+    ///
+    /// // Later, clear all mocks to start fresh
+    /// mock.clear_mocks();
+    ///
+    /// // Configure new mocks
+    /// mock.mock("POST", "/users").respond_with(201, r#"{"id": 1}"#);
+    /// ```
+    pub fn clear_mocks(&mut self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.mocks.clear();
+    }
+
+    /// Returns the number of currently registered mocks.
+    ///
+    /// Useful for testing and debugging mock configurations.
+    pub fn mock_count(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner.mocks.len()
+    }
+
     /// Finds a matching mock for the given request.
+    ///
+    /// If the matching mock has `times_remaining` set, it will be decremented.
+    /// When `times_remaining` reaches 0, the mock is removed (consumed).
     fn find_mock(
         &self,
         method: &Method,
@@ -162,20 +201,40 @@ impl MockClient {
         headers: &HeaderMap,
         query: &[(String, String)],
     ) -> MockedResponse {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
 
-        // Try to find a matching mock
-        for rule in &inner.mocks {
-            if rule.matcher.matches(method.as_str(), url, headers, query) {
-                return rule.response.clone();
+        // Find the index of the first matching mock
+        let matching_index = inner
+            .mocks
+            .iter()
+            .position(|rule| rule.matcher.matches(method.as_str(), url, headers, query));
+
+        if let Some(index) = matching_index {
+            // Clone the response before potentially modifying
+            let response = inner.mocks[index].response.clone();
+
+            // Handle times_remaining
+            if let Some(ref mut remaining) = inner.mocks[index].times_remaining {
+                *remaining = remaining.saturating_sub(1);
+                if *remaining == 0 {
+                    // Mock exhausted, remove it
+                    inner.mocks.remove(index);
+                }
             }
+            // If times_remaining is None, mock is unlimited - don't modify
+
+            return response;
         }
+
         // Return default or 404
-        inner.default_response.clone().unwrap_or_else(|| MockedResponse {
-            status: 404,
-            body: format!("No mock found for {} {}", method, url),
-            headers: HeaderMap::new(),
-        })
+        inner
+            .default_response
+            .clone()
+            .unwrap_or_else(|| MockedResponse {
+                status: 404,
+                body: format!("No mock found for {} {}", method, url),
+                headers: HeaderMap::new(),
+            })
     }
 }
 
@@ -196,6 +255,8 @@ impl Default for MockClient {
 pub struct MockBuilder<'a> {
     client: &'a mut MockClient,
     matcher: RequestMatcher,
+    /// How many times this mock can be matched. None = unlimited (default).
+    times: Option<usize>,
 }
 
 impl<'a> MockBuilder<'a> {
@@ -213,7 +274,9 @@ impl<'a> MockBuilder<'a> {
     ///     .respond_with(200, "[]");
     /// ```
     pub fn match_header(mut self, name: &str, value: &str) -> Self {
-        self.matcher.headers.insert(name.to_string(), value.to_string());
+        self.matcher
+            .headers
+            .insert(name.to_string(), value.to_string());
         self
     }
 
@@ -232,7 +295,37 @@ impl<'a> MockBuilder<'a> {
     ///     .respond_with(200, r#"[{"id": 1}]"#);
     /// ```
     pub fn match_query(mut self, name: &str, value: &str) -> Self {
-        self.matcher.query_params.insert(name.to_string(), value.to_string());
+        self.matcher
+            .query_params
+            .insert(name.to_string(), value.to_string());
+        self
+    }
+
+    /// Sets how many times this mock can be matched before being exhausted.
+    ///
+    /// After being matched the specified number of times, the mock is removed
+    /// and subsequent requests will fall through to other mocks or the default response.
+    ///
+    /// By default, mocks can be matched unlimited times (backwards compatible).
+    /// Use `times(1)` for one-shot mocks that are consumed after a single use.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use postgrest::mock::MockClient;
+    /// # let mut mock = MockClient::new();
+    /// // This mock will only respond once, then be removed
+    /// mock.mock("POST", "/users")
+    ///     .times(1)
+    ///     .respond_with(201, r#"{"id": 1}"#);
+    ///
+    /// // This mock will respond to 3 requests
+    /// mock.mock("GET", "/users")
+    ///     .times(3)
+    ///     .respond_with(200, r#"[]"#);
+    /// ```
+    pub fn times(mut self, n: usize) -> Self {
+        self.times = Some(n);
         self
     }
 
@@ -248,10 +341,7 @@ impl<'a> MockBuilder<'a> {
     /// ```
     pub fn respond_with(self, status: u16, body: &str) {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            "content-type",
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
 
         let response = MockedResponse {
             status,
@@ -263,6 +353,7 @@ impl<'a> MockBuilder<'a> {
         inner.mocks.push(MockRule {
             matcher: self.matcher,
             response,
+            times_remaining: self.times,
         });
     }
 
@@ -278,6 +369,7 @@ impl<'a> MockBuilder<'a> {
         inner.mocks.push(MockRule {
             matcher: self.matcher,
             response,
+            times_remaining: self.times,
         });
     }
 }
@@ -314,7 +406,14 @@ impl RequestMatcher {
         } else {
             url.to_string()
         };
-        let path = format!("/{}", path_with_query.split('?').next().unwrap_or(&path_with_query).trim_start_matches('/'));
+        let path = format!(
+            "/{}",
+            path_with_query
+                .split('?')
+                .next()
+                .unwrap_or(&path_with_query)
+                .trim_start_matches('/')
+        );
 
         if self.path != path {
             return false;
@@ -421,9 +520,19 @@ impl HttpRequestBuilder for MockRequestBuilder {
         self
     }
 
+    fn body_bytes(mut self, body: Vec<u8>) -> Self {
+        // The mock matches on method + path + headers + query only (never the
+        // body), so recording a lossy string is coherent — binary uploads still
+        // route to the right mock, and no body assertion depends on the bytes.
+        self.body = String::from_utf8_lossy(&body).into_owned();
+        self
+    }
+
     async fn send(self) -> Result<Self::Response, Self::Error> {
         // Find matching mock
-        let response = self.client.find_mock(&self.method, &self.url, &self.headers, &self.query);
+        let response = self
+            .client
+            .find_mock(&self.method, &self.url, &self.headers, &self.query);
 
         Ok(MockHttpResponse {
             status: StatusCode::from_u16(response.status).unwrap_or(StatusCode::OK),
@@ -504,10 +613,7 @@ impl std::error::Error for MockHttpError {}
 /// ```
 pub fn mock_json(status: u16, json: &str) -> (u16, String, HeaderMap) {
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "content-type",
-        HeaderValue::from_static("application/json"),
-    );
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
     (status, json.to_string(), headers)
 }
 
@@ -536,14 +642,14 @@ mod tests {
     #[test]
     fn test_mock_client_creation() {
         let mock = MockClient::new();
-        assert_eq!(mock.mocks.len(), 0);
+        assert_eq!(mock.mock_count(), 0);
     }
 
     #[test]
     fn test_mock_builder_basic() {
         let mut mock = MockClient::new();
         mock.mock("GET", "/users").respond_with(200, "[]");
-        assert_eq!(mock.mocks.len(), 1);
+        assert_eq!(mock.mock_count(), 1);
     }
 
     #[test]
@@ -581,7 +687,9 @@ mod tests {
             headers: HashMap::new(),
             query_params: HashMap::new(),
         };
-        matcher.headers.insert("Authorization".to_string(), "Bearer token".to_string());
+        matcher
+            .headers
+            .insert("Authorization".to_string(), "Bearer token".to_string());
 
         let mut headers = HeaderMap::new();
         headers.insert("authorization", HeaderValue::from_static("Bearer token"));
@@ -600,7 +708,9 @@ mod tests {
             headers: HashMap::new(),
             query_params: HashMap::new(),
         };
-        matcher.query_params.insert("id".to_string(), "eq.1".to_string());
+        matcher
+            .query_params
+            .insert("id".to_string(), "eq.1".to_string());
 
         let query = vec![("id".to_string(), "eq.1".to_string())];
         assert!(matcher.matches("GET", "/users", &HeaderMap::new(), &query));
@@ -617,10 +727,7 @@ mod tests {
         let mut mock = MockClient::new();
         mock.mock("GET", "/test").respond_with(200, "success");
 
-        let response = mock.request(Method::GET, "/test")
-            .send()
-            .await
-            .unwrap();
+        let response = mock.request(Method::GET, "/test").send().await.unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.text().await.unwrap(), "success");
@@ -630,7 +737,8 @@ mod tests {
     async fn test_mock_client_no_match_returns_404() {
         let mock = MockClient::new();
 
-        let response = mock.request(Method::GET, "/nonexistent")
+        let response = mock
+            .request(Method::GET, "/nonexistent")
             .send()
             .await
             .unwrap();
@@ -673,5 +781,105 @@ mod tests {
         let (status, body, _headers) = mock_error(500, "Server error");
         assert_eq!(status, 500);
         assert!(body.contains("Server error"));
+    }
+
+    // ========================================================================
+    // One-shot mock (times) tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_times_one_consumes_mock() {
+        let mut mock = MockClient::new();
+        mock.mock("POST", "/users")
+            .times(1)
+            .respond_with(201, r#"{"id": 1}"#);
+
+        assert_eq!(mock.mock_count(), 1);
+
+        // First request should succeed
+        let response = mock.request(Method::POST, "/users").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Mock should be consumed
+        assert_eq!(mock.mock_count(), 0);
+
+        // Second request should get 404 (no mock available)
+        let response = mock.request(Method::POST, "/users").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_times_multiple() {
+        let mut mock = MockClient::new();
+        mock.mock("GET", "/users").times(3).respond_with(200, "[]");
+
+        assert_eq!(mock.mock_count(), 1);
+
+        // Three requests should succeed
+        for _ in 0..3 {
+            let response = mock.request(Method::GET, "/users").send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        // Mock should be consumed after 3 uses
+        assert_eq!(mock.mock_count(), 0);
+
+        // Fourth request should get 404
+        let response = mock.request(Method::GET, "/users").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_unlimited_mock_not_consumed() {
+        let mut mock = MockClient::new();
+        // No .times() call = unlimited (backwards compatible)
+        mock.mock("GET", "/users").respond_with(200, "[]");
+
+        assert_eq!(mock.mock_count(), 1);
+
+        // Multiple requests should all succeed
+        for _ in 0..5 {
+            let response = mock.request(Method::GET, "/users").send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        // Mock should still be there
+        assert_eq!(mock.mock_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sequential_one_shot_mocks() {
+        let mut mock = MockClient::new();
+
+        // Register two one-shot mocks for the same endpoint
+        mock.mock("POST", "/users")
+            .times(1)
+            .respond_with(201, r#"{"id": 1}"#);
+
+        mock.mock("POST", "/users")
+            .times(1)
+            .respond_with(201, r#"{"id": 2}"#);
+
+        assert_eq!(mock.mock_count(), 2);
+
+        // First request gets first mock's response
+        let response = mock.request(Method::POST, "/users").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response.text().await.unwrap();
+        assert!(body.contains("\"id\": 1"));
+
+        assert_eq!(mock.mock_count(), 1);
+
+        // Second request gets second mock's response
+        let response = mock.request(Method::POST, "/users").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response.text().await.unwrap();
+        assert!(body.contains("\"id\": 2"));
+
+        assert_eq!(mock.mock_count(), 0);
+
+        // Third request gets 404
+        let response = mock.request(Method::POST, "/users").send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

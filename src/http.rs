@@ -136,6 +136,12 @@ pub trait HttpRequestBuilder: Send + 'static {
     /// ```
     fn body(self, body: String) -> Self;
 
+    /// Set the request body from raw bytes.
+    ///
+    /// Used for binary payloads (e.g. Supabase Storage uploads) that are not
+    /// valid UTF-8 and therefore cannot go through [`body`](Self::body).
+    fn body_bytes(self, body: Vec<u8>) -> Self;
+
     /// Execute the HTTP request.
     ///
     /// This consumes the builder and returns a Future that resolves to the response.
@@ -227,6 +233,11 @@ impl HttpRequestBuilder for reqwest::RequestBuilder {
 
     fn body(self, body: String) -> Self {
         // Delegate to reqwest's builder
+        reqwest::RequestBuilder::body(self, body)
+    }
+
+    fn body_bytes(self, body: Vec<u8>) -> Self {
+        // reqwest accepts any `Into<Body>`, including `Vec<u8>`.
         reqwest::RequestBuilder::body(self, body)
     }
 

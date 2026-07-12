@@ -122,6 +122,13 @@ impl<C: HttpClient> PostgrestGeneric<C> {
         }
     }
 
+    /// Borrow the underlying HTTP client, for issuing requests to sibling
+    /// Supabase services (Storage, Auth) that live outside the PostgREST base
+    /// path and so cannot go through [`from`](Self::from) / [`rpc`](Self::rpc).
+    pub fn http_client(&self) -> &C {
+        &self.client
+    }
+
     /// Switches the schema.
     ///
     /// # Note
