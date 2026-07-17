@@ -456,7 +456,6 @@ impl RequestMatcher {
 // HttpClient Implementation for MockClient
 // ============================================================================
 
-#[async_trait]
 impl HttpClient for MockClient {
     type RequestBuilder = MockRequestBuilder;
     type Error = MockHttpError;
@@ -489,7 +488,8 @@ pub struct MockRequestBuilder {
     body: String,
 }
 
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl HttpRequestBuilder for MockRequestBuilder {
     type Response = MockHttpResponse;
     type Error = MockHttpError;
@@ -553,7 +553,8 @@ pub struct MockHttpResponse {
     body: String,
 }
 
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl HttpResponse for MockHttpResponse {
     type Error = MockHttpError;
 

@@ -55,6 +55,51 @@ use reqwest::{
 };
 use std::error::Error as StdError;
 
+/// Alias for `Send` on native targets and no bound on wasm.
+///
+/// Browser futures and reqwest's wasm types wrap JS values (`Rc`-based), so
+/// they can never be `Send`. The browser is single-threaded, so the bound is
+/// unnecessary there; on native targets it is preserved unchanged.
+#[cfg(not(target_family = "wasm"))]
+pub trait MaybeSend: Send {}
+#[cfg(not(target_family = "wasm"))]
+impl<T: Send> MaybeSend for T {}
+#[cfg(target_family = "wasm")]
+pub trait MaybeSend {}
+#[cfg(target_family = "wasm")]
+impl<T> MaybeSend for T {}
+
+/// Alias for `Send + Sync` on native targets and no bound on wasm.
+#[cfg(not(target_family = "wasm"))]
+pub trait MaybeSendSync: Send + Sync {}
+#[cfg(not(target_family = "wasm"))]
+impl<T: Send + Sync> MaybeSendSync for T {}
+#[cfg(target_family = "wasm")]
+pub trait MaybeSendSync {}
+#[cfg(target_family = "wasm")]
+impl<T> MaybeSendSync for T {}
+
+/// Error type used by the reqwest implementations on wasm.
+///
+/// `reqwest::Error` wraps a `JsValue` on wasm and is therefore `!Send`, which
+/// breaks downstream `anyhow` conversions that require `Send + Sync` errors.
+/// Error *values* are plain data, so we eagerly convert to an owned string at
+/// the seam and keep the strong `Send + Sync` bound on all `Error` associated
+/// types across both targets.
+#[cfg(target_family = "wasm")]
+#[derive(Debug)]
+pub struct WasmHttpError(pub String);
+
+#[cfg(target_family = "wasm")]
+impl std::fmt::Display for WasmHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl StdError for WasmHttpError {}
+
 /// Trait for HTTP clients that can execute requests.
 ///
 /// This trait abstracts over different HTTP client implementations, allowing
@@ -65,8 +110,7 @@ use std::error::Error as StdError;
 /// - Uses `async_trait` for async methods
 /// - Returns a request builder that supports method chaining
 /// - Generic over error types to support different client implementations
-#[async_trait]
-pub trait HttpClient: Clone + Send + Sync + 'static {
+pub trait HttpClient: Clone + MaybeSendSync + 'static {
     /// The type of request builder this client creates
     type RequestBuilder: HttpRequestBuilder;
 
@@ -98,8 +142,9 @@ pub trait HttpClient: Clone + Send + Sync + 'static {
 ///     .send()
 ///     .await?
 /// ```
-#[async_trait]
-pub trait HttpRequestBuilder: Send + 'static {
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+pub trait HttpRequestBuilder: MaybeSend + 'static {
     /// The type of response returned by this builder
     type Response: HttpResponse;
 
@@ -156,8 +201,9 @@ pub trait HttpRequestBuilder: Send + 'static {
 ///
 /// This trait provides a minimal interface for accessing response data.
 /// It intentionally only exposes methods that postgrest-rs actually uses.
-#[async_trait]
-pub trait HttpResponse: Send + 'static {
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+pub trait HttpResponse: MaybeSend + 'static {
     /// The error type for response operations
     type Error: StdError + Send + Sync + 'static;
 
@@ -202,10 +248,12 @@ pub trait HttpResponse: Send + 'static {
 ///
 /// This enables reqwest to work through our trait abstraction with zero overhead.
 /// All methods are simple pass-throughs to the underlying reqwest types.
-#[async_trait]
 impl HttpClient for reqwest::Client {
     type RequestBuilder = reqwest::RequestBuilder;
+    #[cfg(not(target_family = "wasm"))]
     type Error = reqwest::Error;
+    #[cfg(target_family = "wasm")]
+    type Error = WasmHttpError;
 
     fn request(&self, method: Method, url: impl AsRef<str>) -> Self::RequestBuilder {
         // Delegate directly to reqwest's implementation
@@ -216,10 +264,14 @@ impl HttpClient for reqwest::Client {
 /// Implement HttpRequestBuilder for reqwest::RequestBuilder
 ///
 /// This is a simple pass-through wrapper that maintains reqwest's builder pattern.
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl HttpRequestBuilder for reqwest::RequestBuilder {
     type Response = reqwest::Response;
+    #[cfg(not(target_family = "wasm"))]
     type Error = reqwest::Error;
+    #[cfg(target_family = "wasm")]
+    type Error = WasmHttpError;
 
     fn headers(self, headers: HeaderMap) -> Self {
         // Delegate to reqwest's builder
@@ -242,17 +294,29 @@ impl HttpRequestBuilder for reqwest::RequestBuilder {
     }
 
     async fn send(self) -> Result<Self::Response, Self::Error> {
-        // Delegate to reqwest's send
-        reqwest::RequestBuilder::send(self).await
+        #[cfg(not(target_family = "wasm"))]
+        {
+            reqwest::RequestBuilder::send(self).await
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            reqwest::RequestBuilder::send(self)
+                .await
+                .map_err(|e| WasmHttpError(e.to_string()))
+        }
     }
 }
 
 /// Implement HttpResponse for reqwest::Response
 ///
 /// This provides access to the response through our trait interface.
-#[async_trait]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
 impl HttpResponse for reqwest::Response {
+    #[cfg(not(target_family = "wasm"))]
     type Error = reqwest::Error;
+    #[cfg(target_family = "wasm")]
+    type Error = WasmHttpError;
 
     fn status(&self) -> reqwest::StatusCode {
         reqwest::Response::status(self)
@@ -263,11 +327,30 @@ impl HttpResponse for reqwest::Response {
     }
 
     async fn text(self) -> Result<String, Self::Error> {
-        reqwest::Response::text(self).await
+        #[cfg(not(target_family = "wasm"))]
+        {
+            reqwest::Response::text(self).await
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            reqwest::Response::text(self)
+                .await
+                .map_err(|e| WasmHttpError(e.to_string()))
+        }
     }
 
     async fn bytes(self) -> Result<Vec<u8>, Self::Error> {
-        reqwest::Response::bytes(self).await.map(|b| b.to_vec())
+        #[cfg(not(target_family = "wasm"))]
+        {
+            reqwest::Response::bytes(self).await.map(|b| b.to_vec())
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            reqwest::Response::bytes(self)
+                .await
+                .map(|b| b.to_vec())
+                .map_err(|e| WasmHttpError(e.to_string()))
+        }
     }
 }
 
